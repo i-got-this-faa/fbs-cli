@@ -59,6 +59,39 @@ enum Command {
         json: bool,
     },
 
+    /// List objects with upload time, size, and content type.
+    List {
+        /// Bucket to list.
+        #[arg(default_value = "uploads")]
+        bucket: String,
+
+        /// Only include keys beginning with this prefix.
+        #[arg(long)]
+        prefix: Option<String>,
+
+        /// Emit structured JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Generate a fresh signed link for an existing object.
+    Link {
+        /// Object key.
+        key: String,
+
+        /// Bucket containing the object.
+        #[arg(long, default_value = "uploads")]
+        bucket: String,
+
+        /// Signed-link lifetime in seconds.
+        #[arg(long, default_value_t = 3600)]
+        expires: u64,
+
+        /// Emit structured JSON instead of only the URL.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Check the saved credentials against the server.
     Status,
 
@@ -89,6 +122,17 @@ fn main() {
             content_type,
             json,
         }),
+        Command::List {
+            bucket,
+            prefix,
+            json,
+        } => fbs_cli::commands::list(bucket, prefix, json),
+        Command::Link {
+            key,
+            bucket,
+            expires,
+            json,
+        } => fbs_cli::commands::link(bucket, key, expires, json),
         Command::Status => fbs_cli::commands::status(),
         Command::Logout => fbs_cli::commands::logout(),
     };

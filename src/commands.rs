@@ -100,6 +100,43 @@ pub fn upload(args: UploadArgs) -> Result<()> {
     Ok(())
 }
 
+pub fn list(bucket: String, prefix: Option<String>, json: bool) -> Result<()> {
+    let config = config::load_with_env()?;
+    let objects = FbsClient::new(&config)?.list_objects(&bucket, prefix.as_deref())?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&objects).context("failed to encode object listing")?
+        );
+        return Ok(());
+    }
+
+    println!("KEY\tUPLOADED_AT\tSIZE_BYTES\tCONTENT_TYPE");
+    for object in objects {
+        println!(
+            "{}\t{}\t{}\t{}",
+            object.key, object.uploaded_at, object.size_bytes, object.content_type
+        );
+    }
+    Ok(())
+}
+
+pub fn link(bucket: String, key: String, expires: u64, json: bool) -> Result<()> {
+    let config = config::load_with_env()?;
+    let result = FbsClient::new(&config)?.create_link(&bucket, &key, expires)?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&result).context("failed to encode link result")?
+        );
+    } else {
+        println!("{}", result.url);
+    }
+    Ok(())
+}
+
 pub fn status() -> Result<()> {
     let config = config::load_with_env()?;
     FbsClient::new(&config)?.validate_access()?;

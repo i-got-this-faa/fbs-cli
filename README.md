@@ -31,6 +31,8 @@ link="$(fbs upload ./report.pdf)"
 ```text
 fbs login [--server URL] [--token TOKEN] [--sigv4-access-key KEY] [--sigv4-secret-key SECRET]
 fbs upload FILE [--bucket NAME] [--key KEY] [--expires SECONDS] [--content-type TYPE] [--json]
+fbs list [BUCKET] [--prefix PREFIX] [--json]
+fbs link KEY [--bucket NAME] [--expires SECONDS] [--json]
 fbs status
 fbs logout
 ```
@@ -42,6 +44,19 @@ fbs logout
 ```
 
 For ephemeral agent environments, `FBS_URL`, `FBS_TOKEN`, `FBS_SIGV4_ACCESS_KEY`, and `FBS_SIGV4_SECRET_KEY` override saved credentials.
+
+List objects in the default `uploads` bucket:
+
+```bash
+fbs list
+fbs list uploads --prefix reports/ --json
+```
+
+Generate a fresh link for an existing object:
+
+```bash
+fbs link reports/report.pdf --expires 3600
+```
 
 ## Server Requirements
 

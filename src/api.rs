@@ -29,6 +29,35 @@ pub struct UploadResult {
     pub expires_at: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ObjectInfo {
+    pub key: String,
+    pub uploaded_at: String,
+    pub size_bytes: u64,
+    pub content_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename = "ListBucketResult")]
+struct ListBucketResponse {
+    #[serde(rename = "IsTruncated")]
+    is_truncated: bool,
+    #[serde(rename = "NextContinuationToken", default)]
+    next_continuation_token: String,
+    #[serde(rename = "Contents", default)]
+    contents: Vec<ListBucketObject>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListBucketObject {
+    #[serde(rename = "Key")]
+    key: String,
+    #[serde(rename = "LastModified")]
+    last_modified: String,
+    #[serde(rename = "Size")]
+    size: u64,
+}
+
 #[derive(Debug, Deserialize)]
 struct ManagementErrorEnvelope {
     error: ManagementError,
@@ -100,6 +129,95 @@ impl FbsClient {
         self.ensure_bucket(bucket)?;
         self.put_object(file_path, bucket, key, content_type)?;
         self.create_presigned_url(bucket, key, expires)
+    }
+
+    pub fn list_objects(&self, bucket: &str, prefix: Option<&str>) -> Result<Vec<ObjectInfo>> {
+        validate_bucket(bucket)?;
+        if let Some(prefix) = prefix {
+            validate_prefix(prefix)?;
+        }
+
+        let mut objects = Vec::new();
+        let mut continuation_token: Option<String> = None;
+        loop {
+            let page = self.list_objects_page(bucket, prefix, continuation_token.as_deref())?;
+            for object in page.contents {
+                let content_type = self.object_content_type(bucket, &object.key)?;
+                objects.push(ObjectInfo {
+                    key: object.key,
+                    uploaded_at: object.last_modified,
+                    size_bytes: object.size,
+                    content_type,
+                });
+            }
+
+            if !page.is_truncated {
+                break;
+            }
+            if page.next_continuation_token.is_empty() {
+                bail!("server returned a truncated listing without a continuation token");
+            }
+            continuation_token = Some(page.next_continuation_token);
+        }
+
+        Ok(objects)
+    }
+
+    pub fn create_link(&self, bucket: &str, key: &str, expires: u64) -> Result<UploadResult> {
+        validate_bucket(bucket)?;
+        validate_key(key)?;
+        let expires = validate_expiry(expires)?;
+        self.object_content_type(bucket, key)?;
+        self.create_presigned_url(bucket, key, expires)
+    }
+
+    fn list_objects_page(
+        &self,
+        bucket: &str,
+        prefix: Option<&str>,
+        continuation_token: Option<&str>,
+    ) -> Result<ListBucketResponse> {
+        let mut url = self.url(&[bucket])?;
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("list-type", "2");
+            query.append_pair("max-keys", "1000");
+            if let Some(prefix) = prefix {
+                query.append_pair("prefix", prefix);
+            }
+            if let Some(token) = continuation_token {
+                query.append_pair("continuation-token", token);
+            }
+        }
+
+        let response = self
+            .authenticated(self.http.get(url))
+            .send()
+            .with_context(|| format!("failed to list bucket {bucket}"))?;
+        if !response.status().is_success() {
+            return Err(response_error(response, "failed to list bucket"));
+        }
+
+        let body = response.text().context("failed to read bucket listing")?;
+        from_xml_str(&body).context("server returned an invalid bucket listing")
+    }
+
+    fn object_content_type(&self, bucket: &str, key: &str) -> Result<String> {
+        let url = self.object_url(bucket, key)?;
+        let response = self
+            .authenticated(self.http.head(url))
+            .send()
+            .with_context(|| format!("failed to inspect {bucket}/{key}"))?;
+        if !response.status().is_success() {
+            return Err(response_error(response, "object not found"));
+        }
+
+        Ok(response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/octet-stream")
+            .to_owned())
     }
 
     fn ensure_bucket(&self, bucket: &str) -> Result<()> {
@@ -253,6 +371,13 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_prefix(prefix: &str) -> Result<()> {
+    if prefix.len() > 1024 || prefix.contains(['\0', '\n', '\r']) {
+        bail!("invalid object prefix");
+    }
+    Ok(())
+}
+
 fn validate_expiry(expires: u64) -> Result<u32> {
     let expires = u32::try_from(expires).context("link lifetime is too large")?;
     if !(1..=604_800).contains(&expires) {
@@ -321,5 +446,18 @@ mod tests {
         assert!(validate_bucket("public").is_err());
         assert!(validate_bucket("UPPERCASE").is_err());
         assert!(validate_bucket("192.168.1.1").is_err());
+    }
+
+    #[test]
+    fn list_bucket_xml_is_parsed() {
+        let response: ListBucketResponse = from_xml_str(
+            r#"<ListBucketResult><IsTruncated>false</IsTruncated><Contents><Key>report.pdf</Key><LastModified>2026-08-12T12:00:00.000Z</LastModified><Size>42</Size></Contents></ListBucketResult>"#,
+        )
+        .expect("parse listing");
+
+        assert!(!response.is_truncated);
+        assert_eq!(response.contents.len(), 1);
+        assert_eq!(response.contents[0].key, "report.pdf");
+        assert_eq!(response.contents[0].size, 42);
     }
 }
