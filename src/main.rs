@@ -50,6 +50,10 @@ enum Command {
         #[arg(long, default_value_t = 3600)]
         expires: u64,
 
+        /// Create a link that never expires instead of an expiring one.
+        #[arg(long, conflicts_with = "expires")]
+        permanent: bool,
+
         /// Override the detected content type.
         #[arg(long)]
         content_type: Option<String>,
@@ -83,6 +87,10 @@ enum Command {
         #[arg(long, default_value = "uploads")]
         bucket: String,
 
+        /// Create a link that never expires instead of an expiring one.
+        #[arg(long, conflicts_with = "expires")]
+        permanent: bool,
+
         /// Signed-link lifetime in seconds.
         #[arg(long, default_value_t = 3600)]
         expires: u64,
@@ -112,6 +120,7 @@ fn main() {
             bucket,
             key,
             expires,
+            permanent,
             content_type,
             json,
         } => fbs_cli::commands::upload(fbs_cli::commands::UploadArgs {
@@ -119,6 +128,7 @@ fn main() {
             bucket,
             key,
             expires,
+            permanent,
             content_type,
             json,
         }),
@@ -130,9 +140,10 @@ fn main() {
         Command::Link {
             key,
             bucket,
+            permanent,
             expires,
             json,
-        } => fbs_cli::commands::link(bucket, key, expires, json),
+        } => fbs_cli::commands::link(bucket, key, expires, permanent, json),
         Command::Status => fbs_cli::commands::status(),
         Command::Logout => fbs_cli::commands::logout(),
     };

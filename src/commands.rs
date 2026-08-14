@@ -1,4 +1,4 @@
-use crate::api::FbsClient;
+use crate::api::{FbsClient, LinkLifetime};
 use crate::config::{self, Config};
 use anyhow::{Context, Result, bail};
 use std::io::{self, IsTerminal, Write};
@@ -11,6 +11,7 @@ pub struct UploadArgs {
     pub bucket: String,
     pub key: Option<String>,
     pub expires: u64,
+    pub permanent: bool,
     pub content_type: Option<String>,
     pub json: bool,
 }
@@ -87,7 +88,12 @@ pub fn upload(args: UploadArgs) -> Result<()> {
         args.bucket,
         key
     );
-    let result = client.upload(&args.file, &args.bucket, &key, &content_type, args.expires)?;
+    let lifetime = if args.permanent {
+        LinkLifetime::Permanent
+    } else {
+        LinkLifetime::Seconds(args.expires)
+    };
+    let result = client.upload(&args.file, &args.bucket, &key, &content_type, lifetime)?;
 
     if args.json {
         println!(
@@ -122,9 +128,14 @@ pub fn list(bucket: String, prefix: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn link(bucket: String, key: String, expires: u64, json: bool) -> Result<()> {
+pub fn link(bucket: String, key: String, expires: u64, permanent: bool, json: bool) -> Result<()> {
     let config = config::load_with_env()?;
-    let result = FbsClient::new(&config)?.create_link(&bucket, &key, expires)?;
+    let lifetime = if permanent {
+        LinkLifetime::Permanent
+    } else {
+        LinkLifetime::Seconds(expires)
+    };
+    let result = FbsClient::new(&config)?.create_link(&bucket, &key, lifetime)?;
 
     if json {
         println!(

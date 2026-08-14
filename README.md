@@ -30,9 +30,9 @@ link="$(fbs upload ./report.pdf)"
 
 ```text
 fbs login [--server URL] [--token TOKEN] [--sigv4-access-key KEY] [--sigv4-secret-key SECRET]
-fbs upload FILE [--bucket NAME] [--key KEY] [--expires SECONDS] [--content-type TYPE] [--json]
+fbs upload FILE [--bucket NAME] [--key KEY] [--expires SECONDS | --permanent] [--content-type TYPE] [--json]
 fbs list [BUCKET] [--prefix PREFIX] [--json]
-fbs link KEY [--bucket NAME] [--expires SECONDS] [--json]
+fbs link KEY [--bucket NAME] [--expires SECONDS | --permanent] [--json]
 fbs status
 fbs logout
 ```
@@ -57,6 +57,30 @@ Generate a fresh link for an existing object:
 ```bash
 fbs link reports/report.pdf --expires 3600
 ```
+
+## Permanent links
+
+`--permanent` requests a link that never expires instead of the default
+short-lived presigned URL. It is mutually exclusive with `--expires`:
+
+```bash
+fbs upload ./logo.png --permanent
+fbs link reports/report.pdf --permanent
+```
+
+This uses the server's signed public-read endpoint, so it only succeeds when
+the `fbs-core` server is configured for it:
+
+- `FBS_PUBLIC_READ_SIGNING_SECRET` (at least 32 bytes) must be set, or the
+  server returns an error that public read signing is disabled.
+- The requested lifetime is ~100 years, but the server caps it at
+  `FBS_PUBLIC_READ_MAX_TTL` (default 24 hours). Raise it to allow long-lived
+  links, for example `FBS_PUBLIC_READ_MAX_TTL=876000h`.
+- The saved credentials must be an admin, since the endpoint is part of the
+  admin management API.
+
+A permanent link is revoked by rotating the signing secret or deleting the
+object; it is not tied to the credentials that created it.
 
 ## Server Requirements
 

@@ -36,6 +36,28 @@ pub struct ObjectInfo {
     pub size_bytes: u64,
     pub content_type: String,
 }
+/// How long a generated link should live.
+#[derive(Clone, Copy, Debug)]
+pub enum LinkLifetime {
+    /// Expire after this many seconds (SigV4 presigned URL).
+    Seconds(u64),
+    /// Never expire. The server still caps the lifetime it is willing to sign.
+    Permanent,
+}
+
+/// Requested lifetime for a permanent link: ~100 years, effectively forever.
+const PERMANENT_LINK_TTL_SECONDS: u64 = 100 * 365 * 24 * 60 * 60;
+
+#[derive(Serialize)]
+struct PublicUrlRequest {
+    expires_in_seconds: u64,
+}
+
+#[derive(Deserialize)]
+struct PublicUrlResponse {
+    url: String,
+    expires_at: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename = "ListBucketResult")]
@@ -120,15 +142,15 @@ impl FbsClient {
         bucket: &str,
         key: &str,
         content_type: &str,
-        expires: u64,
+        lifetime: LinkLifetime,
     ) -> Result<UploadResult> {
         validate_bucket(bucket)?;
         validate_key(key)?;
-        let expires = validate_expiry(expires)?;
+        let expires = resolve_lifetime(lifetime)?;
 
         self.ensure_bucket(bucket)?;
         self.put_object(file_path, bucket, key, content_type)?;
-        self.create_presigned_url(bucket, key, expires)
+        self.link_for(bucket, key, expires)
     }
 
     pub fn list_objects(&self, bucket: &str, prefix: Option<&str>) -> Result<Vec<ObjectInfo>> {
@@ -163,12 +185,17 @@ impl FbsClient {
         Ok(objects)
     }
 
-    pub fn create_link(&self, bucket: &str, key: &str, expires: u64) -> Result<UploadResult> {
+    pub fn create_link(
+        &self,
+        bucket: &str,
+        key: &str,
+        lifetime: LinkLifetime,
+    ) -> Result<UploadResult> {
         validate_bucket(bucket)?;
         validate_key(key)?;
-        let expires = validate_expiry(expires)?;
+        let expires = resolve_lifetime(lifetime)?;
         self.object_content_type(bucket, key)?;
-        self.create_presigned_url(bucket, key, expires)
+        self.link_for(bucket, key, expires)
     }
 
     fn list_objects_page(
@@ -308,6 +335,44 @@ impl FbsClient {
         })
     }
 
+    fn link_for(&self, bucket: &str, key: &str, expires: Option<u32>) -> Result<UploadResult> {
+        match expires {
+            Some(seconds) => self.create_presigned_url(bucket, key, seconds),
+            None => self.create_permanent_link(bucket, key),
+        }
+    }
+
+    fn create_permanent_link(&self, bucket: &str, key: &str) -> Result<UploadResult> {
+        let url = self.public_url_endpoint(bucket, key)?;
+        let response = self
+            .authenticated(self.http.post(url))
+            .json(&PublicUrlRequest {
+                expires_in_seconds: PERMANENT_LINK_TTL_SECONDS,
+            })
+            .send()
+            .with_context(|| format!("failed to request a permanent link for {bucket}/{key}"))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error = response_error(response, "failed to create permanent link");
+            return Err(error.context(permanent_link_hint(status)));
+        }
+
+        let body: PublicUrlResponse = response
+            .json()
+            .context("server returned an invalid permanent link response")?;
+        Ok(UploadResult {
+            url: body.url,
+            bucket: bucket.to_owned(),
+            key: key.to_owned(),
+            expires_at: body.expires_at,
+        })
+    }
+
+    fn public_url_endpoint(&self, bucket: &str, key: &str) -> Result<Url> {
+        self.url(&public_url_segments(bucket, key))
+    }
+
     fn authenticated(
         &self,
         request: reqwest::blocking::RequestBuilder,
@@ -338,6 +403,13 @@ fn build_url(base_url: &Url, segments: &[&str]) -> Result<Url> {
         path.extend(segments.iter().copied());
     }
     Ok(url)
+}
+
+fn public_url_segments<'a>(bucket: &'a str, key: &'a str) -> Vec<&'a str> {
+    let mut segments = vec!["api", "management", "buckets", bucket, "objects"];
+    segments.extend(key.split('/'));
+    segments.push("public-url");
+    segments
 }
 
 fn validate_bucket(bucket: &str) -> Result<()> {
@@ -376,6 +448,28 @@ fn validate_prefix(prefix: &str) -> Result<()> {
         bail!("invalid object prefix");
     }
     Ok(())
+}
+
+fn resolve_lifetime(lifetime: LinkLifetime) -> Result<Option<u32>> {
+    match lifetime {
+        LinkLifetime::Seconds(seconds) => validate_expiry(seconds).map(Some),
+        LinkLifetime::Permanent => Ok(None),
+    }
+}
+
+fn permanent_link_hint(status: StatusCode) -> String {
+    match status {
+        StatusCode::SERVICE_UNAVAILABLE => {
+            "the server has public read signing disabled; set FBS_PUBLIC_READ_SIGNING_SECRET (at least 32 bytes) on the server".to_owned()
+        }
+        StatusCode::BAD_REQUEST => {
+            "the server's maximum public link lifetime is below 100 years; raise FBS_PUBLIC_READ_MAX_TTL (for example FBS_PUBLIC_READ_MAX_TTL=876000h) on the server".to_owned()
+        }
+        StatusCode::FORBIDDEN => {
+            "the saved credentials are not an admin; permanent links require the admin management API".to_owned()
+        }
+        _ => "the server refused to create a permanent link".to_owned(),
+    }
 }
 
 fn validate_expiry(expires: u64) -> Result<u32> {
@@ -422,6 +516,47 @@ mod tests {
             url.as_str(),
             "https://storage.example.com/uploads/reports/hello%20world%23.txt"
         );
+    }
+
+    #[test]
+    fn permanent_link_endpoint_encodes_key_without_losing_slashes() {
+        let base = Url::parse("https://storage.example.com").expect("base URL");
+        let url = build_url(
+            &base,
+            &public_url_segments("uploads", "reports/hello world#.txt"),
+        )
+        .expect("permanent link endpoint");
+
+        assert_eq!(
+            url.as_str(),
+            "https://storage.example.com/api/management/buckets/uploads/objects/reports/hello%20world%23.txt/public-url"
+        );
+    }
+
+    #[test]
+    fn permanent_link_request_serializes_long_expiry() {
+        let request = PublicUrlRequest {
+            expires_in_seconds: PERMANENT_LINK_TTL_SECONDS,
+        };
+
+        assert_eq!(
+            serde_json::to_string(&request).expect("serialize"),
+            r#"{"expires_in_seconds":3153600000}"#
+        );
+    }
+
+    #[test]
+    fn lifetime_resolves_to_validated_expiry() {
+        assert_eq!(
+            resolve_lifetime(LinkLifetime::Permanent).expect("permanent"),
+            None
+        );
+        assert_eq!(
+            resolve_lifetime(LinkLifetime::Seconds(3600)).expect("one hour"),
+            Some(3600)
+        );
+        assert!(resolve_lifetime(LinkLifetime::Seconds(0)).is_err());
+        assert!(resolve_lifetime(LinkLifetime::Seconds(604_801)).is_err());
     }
 
     #[test]
